@@ -1,0 +1,18 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "xrs"
+version = "0.0.0"
+authors = [ "AquariWM <contact@aquariwm.org>", "Antikyth <antikyth at gmail dot com>" ]
+edition = "2021"
+description = "An asynchronous Rust library for X11 and associated extensions/protocols."
+license = "MPL-2.0"
+keywords = [ "x11", "xorg", "wm", "xcb", "xlib" ]
+categories = [ "api-bindings", "asynchronous", "gui", "network-programming", "rendering" ]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+xrb = { path = "../xrb" }
