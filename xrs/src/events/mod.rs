@@ -10,9 +10,45 @@ pub mod notifications {}
 /// X.
 pub mod queries {}
 /// Contains [Event]s sent in reply to a particular request.
-pub mod replies {}
+pub mod replies {
+    use super::{Event, RawEvent};
+
+    pub struct InitConnection<'a> {
+        result: xrb::ConnectionInitResult<'a>,
+    }
+
+    impl Event for InitConnection<'static> {
+        fn raw_event(self) -> Box<dyn RawEvent> {
+            Box::new(xrb::ConnectionInitReply::<'static> {
+                result: self.result,
+            })
+        }
+    }
+}
 /// Contains [Event]s that request an action to be completed.
-pub mod requests {}
+pub mod requests {
+    use super::{Event, RawEvent};
+
+    pub struct InitConnection {}
+
+    impl Event for InitConnection {
+        fn raw_event(self) -> Box<dyn RawEvent> {
+            Box::new(xrb::ConnectionInitRequest {
+                byte_order: xrb::ByteOrder::native(),
+                protocol_major_version: xrb::PROTOCOL_MAJOR_VERSION,
+                protocol_minor_version: xrb::PROTOCOL_MINOR_VERSION,
+                auth_protocol_name: "",
+                auth_data: "",
+            })
+        }
+    }
+}
 
 /// An event that can be received from or sent to the X server.
-pub trait Event {}
+pub trait Event {
+    fn raw_event(self) -> Box<dyn RawEvent>;
+}
+pub trait RawEvent {}
+
+impl RawEvent for xrb::ConnectionInitRequest<'_> {}
+impl RawEvent for xrb::ConnectionInitReply<'_> {}

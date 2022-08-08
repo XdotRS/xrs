@@ -11,6 +11,8 @@ use async_std::os::unix::net::UnixStream;
 
 use regex::Regex;
 
+use crate::Event;
+
 /// Marker trait allowing the generic usage of either [TcpStream](async_std::net::TcpStream) or
 /// [UnixStream](async_std::os::unix::net::UnixStream).
 ///
@@ -30,11 +32,14 @@ impl Socket for TcpStream {}
 impl Socket for UnixStream {}
 
 pub struct Connection {
-    socket: Box<dyn Socket>,
-    screen_number: String,
+    _socket: Box<dyn Socket>,
 }
 
 impl Connection {
+    pub async fn send(&self, _event: &dyn Event) {
+        todo!()
+    }
+
     /// Parses a [`DisplayServer`] enum, returns the connected socket and the screen number.
     ///
     /// If a hostname was provided, this function connects to a TCP socket with the given hostname
@@ -128,10 +133,10 @@ pub enum DisplayServer {
 /// let local_conn = xrs::connect(xrs::DisplayServer::Of(":0"));
 /// ```
 pub async fn connect(display_server: DisplayServer) -> Result<Connection, io::Error> {
-    let (socket, screen_number) = Connection::init(display_server).await?;
+    let (socket, _screen_number) = Connection::init(display_server).await?;
+    let conn = Connection { _socket: socket };
 
-    Ok(Connection {
-        socket,
-        screen_number,
-    })
+    conn.send(&crate::req::InitConnection {}).await;
+
+    Ok(conn)
 }
