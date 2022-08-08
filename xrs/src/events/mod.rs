@@ -4,11 +4,13 @@
 
 /// Contains [Event]s that notify listeners about actions which have already occurred.
 pub mod notifications {}
+
 /// Contains [Event]s that are sent to query a particular piece of information.
 ///
 /// Queries only retrieve information, they _do not_ affect the operation of anything else within
 /// X.
 pub mod queries {}
+
 /// Contains [Event]s sent in reply to a particular request.
 pub mod replies {
     use super::{Event, RawEvent};
@@ -25,6 +27,7 @@ pub mod replies {
         }
     }
 }
+
 /// Contains [Event]s that request an action to be completed.
 pub mod requests {
     use super::{Event, RawEvent};
@@ -48,6 +51,7 @@ pub mod requests {
 pub trait Event {
     fn raw_event(self) -> Box<dyn RawEvent>;
 }
+
 pub trait RawEvent {}
 
 impl RawEvent for xrb::ConnectionInitRequest<'_> {}

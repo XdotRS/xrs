@@ -7,7 +7,7 @@ mod events;
 
 pub use connection::connect;
 pub use connection::Connection;
-pub use connection::DisplayServer;
+pub use connection::Server;
 
 pub use events::Event;
 
