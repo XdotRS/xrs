@@ -11,7 +11,10 @@ pub use connection::Server;
 
 pub use events::Event;
 
-pub use events::notifications as notif;
-pub use events::queries as query;
-pub use events::replies as reply;
-pub use events::requests as req;
+pub use events::notif;
+pub use events::query;
+pub use events::reply;
+pub use events::req;
+
+pub use xrb::ConnectionInitResult as InitConnectionResult;
+pub use xrb::RawEvent;

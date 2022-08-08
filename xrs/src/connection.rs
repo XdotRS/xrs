@@ -36,8 +36,9 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub async fn send(&self, _event: &dyn Event) {
-        todo!()
+    /// Sends an [Event] to the X server.
+    pub async fn send(&self, _event: &dyn Event) -> Option<&dyn Event> {
+        todo!();
     }
 
     /// Parses a [`DisplayServer`] enum, returns the connected socket and the screen number.
@@ -49,8 +50,8 @@ impl Connection {
     ///
     /// The returned `String` is the preferred screen number which the connection to the X server
     /// should include. If no screen number was given in the [DisplayServer], it defaults to `0`.
-    async fn init(display_server: Server) -> Result<(Box<dyn Socket>, String), io::Error> {
-        let address = match display_server {
+    async fn init(server: Server) -> Result<(Box<dyn Socket>, String), io::Error> {
+        let address = match server {
             Server::Default => {
                 // If the default X server is chosen, return the contents of the `DISPLAY`
                 // environment variable.
@@ -163,8 +164,8 @@ pub enum Server {
 /// let local_conn = xrs::connect(xrs::DisplayServer::Of(":0"));
 /// ```
 pub async fn connect(server: Server) -> Result<Connection, io::Error> {
-    let (socket, _screen_number) = Connection::init(server).await?;
-    let conn = Connection { _socket: socket };
+    let (_socket, _screen_number) = Connection::init(server).await?;
+    let conn = Connection { _socket };
 
     conn.send(&crate::req::InitConnection {}).await;
 
