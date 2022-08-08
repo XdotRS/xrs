@@ -16,3 +16,6 @@ categories = [ "api-bindings", "asynchronous", "gui", "network-programming", "re
 
 [dependencies]
 xrb = { path = "../xrb", version = "0" }
+async-std = "1"
+regex = "1"
+async-trait = "0.1"
