@@ -12,15 +12,15 @@ use crate::events::Event;
 ///
 /// Associated request: [xrs::req::InitConnection](crate::req::InitConnection)
 pub struct InitConnectionReply<'a> {
-    result: xrb::ConnectionInitResult<'a>,
+	result: xrb::ConnectionInitResult<'a>,
 }
 
 impl Event for InitConnectionReply<'static> {
-    fn raw_event(self) -> Box<dyn xrb::RawEvent> {
-        Box::new(xrb::replies::ConnectionInit::<'static> {
-            result: self.result,
-        })
-    }
+	fn raw_event(self) -> Box<dyn xrb::RawEvent> {
+		Box::new(xrb::replies::ConnectionInit::<'static> {
+			result: self.result,
+		})
+	}
 }
 
 /// A request to initialize a connection with the X server.
@@ -29,13 +29,13 @@ impl Event for InitConnectionReply<'static> {
 pub struct InitConnectionRequest {}
 
 impl Event for InitConnectionRequest {
-    fn raw_event(self) -> Box<dyn xrb::RawEvent> {
-        Box::new(xrb::requests::ConnectionInit {
-            byte_order: xrb::ByteOrder::native(),
-            protocol_major_version: xrb::PROTOCOL_MAJOR_VERSION,
-            protocol_minor_version: xrb::PROTOCOL_MINOR_VERSION,
-            auth_protocol_name: "",
-            auth_data: "",
-        })
-    }
+	fn raw_event(self) -> Box<dyn xrb::RawEvent> {
+		Box::new(xrb::requests::ConnectionInit {
+			byte_order: xrb::ByteOrder::native(),
+			protocol_major_version: xrb::PROTOCOL_MAJOR_VERSION,
+			protocol_minor_version: xrb::PROTOCOL_MINOR_VERSION,
+			auth_protocol_name: "",
+			auth_data: "",
+		})
+	}
 }

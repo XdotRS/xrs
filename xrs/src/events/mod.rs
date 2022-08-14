@@ -15,15 +15,15 @@ pub mod query {}
 
 /// Contains [Event]s sent in reply to a particular request.
 pub mod reply {
-    pub use super::init_connection::InitConnectionReply as InitConnection;
+	pub use super::init_connection::InitConnectionReply as InitConnection;
 }
 
 /// Contains [Event]s that request an action to be completed.
 pub mod req {
-    pub use super::init_connection::InitConnectionRequest as InitConnection;
+	pub use super::init_connection::InitConnectionRequest as InitConnection;
 }
 
 /// An event that can be received from or sent to the X server.
 pub trait Event {
-    fn raw_event(self) -> Box<dyn xrb::RawEvent>;
+	fn raw_event(self) -> Box<dyn xrb::RawEvent>;
 }
