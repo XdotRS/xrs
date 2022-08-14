@@ -5,7 +5,7 @@
 [package]
 name = "xrs"
 version = "0.1.0-dev"
-authors = [ "AquariWM <contact@aquariwm.org>", "Antikyth <antikyth at gmail dot com>" ]
+authors = [ "Antikyth <antikyth at gmail dot com>" ]
 edition = "2021"
 description = "An asynchronous Rust library for X11 and associated extensions/protocols."
 license = "MPL-2.0"
