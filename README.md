@@ -32,3 +32,23 @@ purposes:
   and maximum bounds;
 - to send `Request`s via `Client::send`; and
 - to receive incoming `Event`s, `Error`s, and `Reply`s.
+
+# Examples
+```rust
+use xrs::{Client, ConnectionError, Message, TargetDisplay};
+
+#[tokio::main]
+pub async fn main() -> Result<!, ConnectionError> {
+    let client = Client::connect(TargetDisplay::Default, None)?;
+
+    loop {
+        if let Some(message) = client.next_message() {
+            match message {
+                Message::Event(_event) => todo!(),
+
+                Message::Error(_error) => todo!(),
+            }
+        }
+    }
+}
+```
