@@ -16,4 +16,5 @@ categories = [ "api-bindings", "asynchronous", "gui", "network-programming", "re
 
 [dependencies]
 xrb = { path = "../xrb", version = "0.1.0-dev" }
+xrbk = { path = "../xrb/xrbk", version = "0.0.2" }
 async-std = "1"

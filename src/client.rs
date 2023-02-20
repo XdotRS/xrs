@@ -7,7 +7,7 @@ use async_std::net::TcpStream;
 use async_std::os::unix::net::UnixStream;
 
 use crate::stream::Stream;
-use async_std::io;
+use async_std::{io, io::WriteExt};
 use chumsky::prelude::*;
 use std::{
 	env,
@@ -16,11 +16,16 @@ use std::{
 	net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 use xrb::{
-	connection::ImageEndianness,
+	connection::{
+		ConnectionAuthenticationError,
+		ConnectionFailure,
+		ConnectionResponse,
+		ConnectionSuccess,
+		InitConnection,
+	},
 	message::Request,
-	visual::{Format, Screen},
-	Keycode,
 };
+use xrbk::{Readable, Writable};
 
 enum BitmapFormat {
 	U8,
@@ -30,29 +35,7 @@ enum BitmapFormat {
 
 pub struct Client {
 	stream: Stream,
-
-	server_major_version: u16,
-	server_minor_version: u16,
-
-	vendor: String,
-	release_number: u32,
-
-	resource_id_base: u32,
-	resource_id_mask: u32,
-
-	image_byte_order: ImageEndianness,
-	bitmap_scanline_unit: BitmapFormat,
-	bitmap_scanline_padding: BitmapFormat,
-
-	pixmap_formats: Vec<Format>,
-	screens: Vec<Screen>,
-
-	motion_buffer_size: u32,
-
-	maximum_request_length: u16,
-
-	min_keycode: Keycode,
-	max_keycode: Keycode,
+	// TODO: store info provided by the X server
 }
 
 pub enum ConnectError {
@@ -60,33 +43,93 @@ pub enum ConnectError {
 	/// variable if [`Display::Default`] is specified.
 	Parse(DisplayNameParseError),
 	Io(io::Error),
-	Rejected,
+
+	Failed(ConnectionFailure),
+	Auth(ConnectionAuthenticationError),
 }
 
 impl Client {
+	pub async fn send<Req: Request>(&mut self, request: Req) -> Result<(), io::Error> {
+		if let Err(error) = request.write_to(&mut self.stream) {
+			return Err(io::Error::new(io::ErrorKind::Other, error));
+		}
+
+		self.stream.flush().await?;
+
+		// TODO: replies
+
+		Ok(())
+	}
+
 	pub async fn connect(display: Display, auth: Option<AuthInfo>) -> Result<Self, ConnectError> {
-		let display_name = match display {
-			Display::Default => match DisplayName::parse(
-				&env::var("DISPLAY")
-					.expect("expected DISPLAY environment variable for Display::Default"),
-			) {
-				Ok(display_name) => display_name,
-				Err(error) => return Err(ConnectError::Parse(error)),
+		// If `Display::Default` is specified, parse the display name.
+		let DisplayName {
+			protocol,
+			hostname,
+			display,
+			screen: _,
+		} = match display {
+			Display::Default => {
+				let display_env = &env::var("DISPLAY")
+					.expect("expected DISPLAY environment variable for Display::Default");
+
+				match DisplayName::parse(display_env) {
+					Ok(display_name) => display_name,
+					Err(error) => return Err(ConnectError::Parse(error)),
+				}
 			},
 
 			Display::Specific(name) => name,
 		};
 
-		let display = display_name.display;
-		let stream = Self::open_stream(&display_name.protocol, &display_name.hostname).await?;
+		// Open the appropriate data stream.
+		let mut stream = Self::open_stream(&protocol, &hostname, display).await?;
 
-		todo!()
+		let (auth_name, auth_data) = match auth {
+			Some(AuthInfo {
+				protocol_name,
+				protocol_data,
+			}) => (&*protocol_name, &*protocol_data),
+
+			None => ("", ""),
+		};
+		let message = InitConnection {
+			auth_protocol_name: auth_name.into(),
+			auth_protocol_data: auth_data.into(),
+		};
+
+		// Serialize the `message`.
+		message.write_to(&mut stream).unwrap();
+
+		// Send the `InitConnection` message.
+		if let Err(error) = stream.flush().await {
+			return Err(ConnectError::Io(error));
+		}
+
+		// Receive the connection response.
+		let response = match ConnectionResponse::read_from(&mut stream) {
+			Ok(response) => response,
+
+			Err(error) => {
+				return Err(ConnectError::Io(io::Error::new(
+					io::ErrorKind::Other,
+					error,
+				)))
+			},
+		};
+
+		match response {
+			ConnectionResponse::Success(ConnectionSuccess { .. }) => Ok(Self { stream }),
+
+			ConnectionResponse::Failed(failure) => Err(ConnectError::Failed(failure)),
+			ConnectionResponse::Authenticate(auth_error) => Err(ConnectError::Auth(auth_error)),
+		}
 	}
 }
 
 impl Client {
 	async fn open_stream(
-		protocol: &Option<Protocol>, hostname: &Option<Hostname>,
+		protocol: &Option<Protocol>, hostname: &Option<Hostname>, display: i16,
 	) -> Result<Stream, ConnectError> {
 		Ok(match (protocol, hostname) {
 			// IPv4 with address
@@ -141,21 +184,22 @@ impl Client {
 				})
 			},
 
-			// Unspecified protocol
-			#[cfg(unix)]
-			(None, None) => todo!(),
-			#[cfg(not(unix))]
-			(None, None) => Stream::TcpStream(match Self::open_tcp_stream(None, None, display).await {
-				Ok(stream) => stream,
-				Err(error) => return Err(ConnectError::Io(error)),
-			}),
-
 			// Unix domain sockets (IPC)
 			#[cfg(unix)]
-			(Some(Protocol::Unix), None)
-			| (Some(Protocol::Unix), Some(Hostname::Unix))
-			| (None, Some(Hostname::Unix)) => {
+			(None, None) // unix domain sockets are default on #[cfg(unix)]
+			| (None, Some(Hostname::Unix)) // hostname is "unix"
+			| (Some(Protocol::Unix), None) // protocol is "unix"
+			| (Some(Protocol::Unix), Some(Hostname::Unix)) => { // both are "unix"
 				Stream::UnixStream(match Self::open_unix_stream(display).await {
+					Ok(stream) => stream,
+					Err(error) => return Err(ConnectError::Io(error)),
+				})
+			},
+
+			// Default (if neither protocol nor hostname are specified) on #[cfg(not(unix))].
+			#[cfg(not(unix))]
+			(None, None) => {
+				Stream::TcpStream(match Self::open_tcp_stream(None, None, display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
 				})
@@ -208,13 +252,6 @@ impl Client {
 		let socket = format!("/tmp/.X11-unix/X{}", display);
 
 		UnixStream::connect(socket)
-	}
-}
-
-impl Drop for Client {
-	// disconnect
-	fn drop(&mut self) {
-		todo!("need to send request to end connection")
 	}
 }
 
@@ -374,7 +411,6 @@ impl DisplayName {
 	}
 }
 
-#[non_exhaustive]
 pub enum Protocol {
 	/// A connection is established over DECnet.
 	#[deprecated]
@@ -417,17 +453,4 @@ enum IpType {
 pub struct AuthInfo {
 	pub protocol_name: String,
 	pub protocol_data: String,
-}
-
-pub enum ConnectionError {
-	ConnectionFailure,
-	AuthenticationError,
-}
-
-pub struct Timeout;
-
-impl Client {
-	pub async fn send<R: Request>(&self, _request: R) -> Result<R::Reply, Timeout> {
-		todo!()
-	}
 }
