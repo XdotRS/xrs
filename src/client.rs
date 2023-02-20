@@ -2,12 +2,22 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use regex::{Match, Regex};
-use std::fmt::Formatter;
-use std::{env, fmt};
-use xrb::message::Request;
+use async_std::net::TcpStream;
+#[cfg(unix)]
+use async_std::os::unix::net::UnixStream;
+
+use crate::stream::Stream;
+use async_std::io;
+use chumsky::prelude::*;
+use std::{
+	env,
+	fmt,
+	fmt::Formatter,
+	net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 use xrb::{
 	connection::ImageEndianness,
+	message::Request,
 	visual::{Format, Screen},
 	Keycode,
 };
@@ -19,6 +29,8 @@ enum BitmapFormat {
 }
 
 pub struct Client {
+	stream: Stream,
+
 	server_major_version: u16,
 	server_minor_version: u16,
 
@@ -43,35 +55,166 @@ pub struct Client {
 	max_keycode: Keycode,
 }
 
+pub enum ConnectError {
+	/// An error parsing the display name specified by the `DISPLAY` environment
+	/// variable if [`Display::Default`] is specified.
+	Parse(DisplayNameParseError),
+	Io(io::Error),
+	Rejected,
+}
+
 impl Client {
-	pub async fn connect(
-		display: Display,
-		auth: Option<AuthInfo>,
-	) -> Result<Self, ConnectionError> {
+	pub async fn connect(display: Display, auth: Option<AuthInfo>) -> Result<Self, ConnectError> {
 		let display_name = match display {
-			Display::Default => DisplayName::parse(
+			Display::Default => match DisplayName::parse(
 				&env::var("DISPLAY")
 					.expect("expected DISPLAY environment variable for Display::Default"),
-			),
+			) {
+				Ok(display_name) => display_name,
+				Err(error) => return Err(ConnectError::Parse(error)),
+			},
 
 			Display::Specific(name) => name,
 		};
 
-		let protocol_type = match &display_name.protocol {
-			Some(protocol) => protocol.protocol_type(),
-
-			None if display_name.hostname.is_some() => ProtocolType::Tcp,
-			None => ProtocolType::Unix,
-		};
+		let display = display_name.display;
+		let stream = Self::open_stream(&display_name.protocol, &display_name.hostname).await?;
 
 		todo!()
+	}
+}
+
+impl Client {
+	async fn open_stream(
+		protocol: &Option<Protocol>, hostname: &Option<Hostname>,
+	) -> Result<Stream, ConnectError> {
+		Ok(match (protocol, hostname) {
+			// IPv4 with address
+			(Some(Protocol::Inet), Some(Hostname::Other(hostname))) => Stream::TcpStream(
+				match Self::open_tcp_stream(Some(IpType::V4), Some(&*hostname), display).await {
+					Ok(stream) => stream,
+					Err(error) => return Err(ConnectError::Io(error)),
+				},
+			),
+
+			// IPv6 with address
+			(None, Some(Hostname::Inet6(hostname)))
+			| (Some(Protocol::Tcp), Some(Hostname::Inet6(hostname)))
+			| (Some(Protocol::Inet6), Some(Hostname::Inet6(hostname)))
+			| (Some(Protocol::Inet6), Some(Hostname::Other(hostname))) => Stream::TcpStream(
+				match Self::open_tcp_stream(Some(IpType::V6), Some(&*hostname), display).await {
+					Ok(stream) => stream,
+					Err(error) => return Err(ConnectError::Io(error)),
+				},
+			),
+
+			// TCP with address but unspecified IP version
+			(None, Some(Hostname::Other(hostname)))
+			| (Some(Protocol::Tcp), Some(Hostname::Other(hostname))) => Stream::TcpStream(
+				match Self::open_tcp_stream(None, Some(&*hostname), display).await {
+					Ok(stream) => stream,
+					Err(error) => return Err(ConnectError::Io(error)),
+				},
+			),
+
+			// IPv4 without address
+			(Some(Protocol::Inet), None) => Stream::TcpStream(
+				match Self::open_tcp_stream(Some(IpType::V4), None, display).await {
+					Ok(stream) => stream,
+					Err(error) => return Err(ConnectError::Io(error)),
+				},
+			),
+
+			// IPv6 without address
+			(Some(Protocol::Inet6), None) => Stream::TcpStream(
+				match Self::open_tcp_stream(Some(IpType::V6), None, display).await {
+					Ok(stream) => stream,
+					Err(error) => return Err(ConnectError::Io(error)),
+				},
+			),
+
+			// TCP without address and unspecified IP version
+			(Some(Protocol::Tcp), None) => {
+				Stream::TcpStream(match Self::open_tcp_stream(None, None, display).await {
+					Ok(stream) => stream,
+					Err(error) => return Err(ConnectError::Io(error)),
+				})
+			},
+
+			// Unspecified protocol
+			#[cfg(unix)]
+			(None, None) => todo!(),
+			#[cfg(not(unix))]
+			(None, None) => Stream::TcpStream(match Self::open_tcp_stream(None, None, display).await {
+				Ok(stream) => stream,
+				Err(error) => return Err(ConnectError::Io(error)),
+			}),
+
+			// Unix domain sockets (IPC)
+			#[cfg(unix)]
+			(Some(Protocol::Unix), None)
+			| (Some(Protocol::Unix), Some(Hostname::Unix))
+			| (None, Some(Hostname::Unix)) => {
+				Stream::UnixStream(match Self::open_unix_stream(display).await {
+					Ok(stream) => stream,
+					Err(error) => return Err(ConnectError::Io(error)),
+				})
+			},
+
+			// DECnet was orphaned in the Linux kernel in 2010...
+			(None, Some(Hostname::DecNet(_))) => {
+				unimplemented!(
+					"DECnet is not implemented; it was orphaned in the Linux kernel back in 2010"
+				)
+			},
+
+			// TODO: improve errors
+			_ => return Err(ConnectError::Parse(DisplayNameParseError::IllFormatted)),
+		})
+	}
+
+	async fn open_tcp_stream(
+		ip_type: Option<IpType>, hostname: Option<&str>, display: i16,
+	) -> Result<TcpStream, io::Error> {
+		const TCP_PORT: u16 = 6000;
+
+		let port = ((TCP_PORT as i16) + display) as u16;
+
+		match (ip_type, hostname) {
+			// IP version interpreted
+			(None, Some(address)) => TcpStream::connect((address.parse::<IpAddr>()?, port)),
+
+			// IPv6 with address
+			(Some(IpType::V6), Some(address)) => {
+				TcpStream::connect((address.parse::<Ipv6Addr>()?, port))
+			},
+			// IPv6 localhost
+			(Some(IpType::V6), None) => TcpStream::connect((Ipv6Addr::LOCALHOST, port)),
+
+			// IPv4 with address
+			(Some(IpType::V4), Some(address)) => {
+				TcpStream::connect((address.parse::<Ipv4Addr>()?, port))
+			},
+			// IPv4 localhost (also the fallback)
+			(Some(IpType::V4), None) | (None, None) => {
+				TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+			},
+		}
+	}
+
+	#[cfg(unix)]
+	async fn open_unix_stream(display: i16) -> Result<UnixStream, io::Error> {
+		// FIXME: see if we need to check /var/tsol/doors/.X11-unix/X on Solaris
+		let socket = format!("/tmp/.X11-unix/X{}", display);
+
+		UnixStream::connect(socket)
 	}
 }
 
 impl Drop for Client {
 	// disconnect
 	fn drop(&mut self) {
-		todo!()
+		todo!("need to send request to end connection")
 	}
 }
 
@@ -82,20 +225,29 @@ pub enum Display {
 
 pub struct DisplayName {
 	pub protocol: Option<Protocol>,
-	pub hostname: Option<String>,
+	pub hostname: Option<Hostname>,
 
-	pub display_num: isize,
-	pub screen_num: Option<isize>,
+	pub display: i16,
+	pub screen: Option<i16>,
+}
+
+pub enum Hostname {
+	DecNet(String),
+	Inet6(String),
+	#[cfg(unix)]
+	Unix,
+
+	Other(String),
 }
 
 impl DisplayName {
-	pub const fn new(display_num: isize) -> Self {
+	pub const fn new(display: i16) -> Self {
 		Self {
 			protocol: None,
 			hostname: None,
 
-			display_num,
-			screen_num: None,
+			display,
+			screen: None,
 		}
 	}
 
@@ -105,14 +257,14 @@ impl DisplayName {
 		self
 	}
 
-	pub fn hostname(&mut self, hostname: String) -> &mut Self {
+	pub fn hostname(&mut self, hostname: Hostname) -> &mut Self {
 		self.hostname = Some(hostname);
 
 		self
 	}
 
-	pub fn screen_num(&mut self, screen_num: isize) -> &mut Self {
-		self.screen_num = Some(screen_num);
+	pub fn screen(&mut self, screen: i16) -> &mut Self {
+		self.screen = Some(screen);
 
 		self
 	}
@@ -121,18 +273,21 @@ impl DisplayName {
 impl fmt::Display for DisplayName {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		match &self.protocol {
-			Some(Protocol::Tcp) => write!(f, "{}/", "tcp")?,
-			Some(Protocol::Inet) => write!(f, "{}/", "inet")?,
-			Some(Protocol::Inet6) => write!(f, "{}/", "inet6")?,
+			Some(Protocol::Tcp) => write!(f, "{}/", Protocol::Tcp)?,
+			Some(Protocol::Inet) => write!(f, "{}/", Protocol::Inet)?,
+			Some(Protocol::Inet6) => write!(f, "{}/", Protocol::Inet6)?,
 
-			Some(Protocol::Unix) => write!(f, "{}/", "unix")?,
+			#[cfg(unix)]
+			Some(Protocol::Unix) => write!(f, "{}/", Protocol::Unix)?,
 
-			_ => {}
+			#[allow(deprecated)]
+			Some(Protocol::DecNet) | None => {},
 		}
 
 		if let Some(hostname) = &self.hostname {
 			write!(f, hostname)?;
 
+			#[allow(deprecated)]
 			if let Some(Protocol::DecNet) = &self.protocol {
 				write!(f, "::")?;
 			} else {
@@ -140,10 +295,10 @@ impl fmt::Display for DisplayName {
 			}
 		}
 
-		write!(f, self.display_num)?;
+		write!(f, self.display)?;
 
-		if let Some(screen_num) = &self.screen_num {
-			write!(f, ".{}", screen_num)?;
+		if let Some(screen) = &self.screen {
+			write!(f, ".{}", screen)?;
 		}
 
 		Ok(())
@@ -156,82 +311,65 @@ pub enum DisplayNameParseError {
 }
 
 impl DisplayName {
-	pub fn parse(string: &str) -> Result<Self, IllFormatted> {
-		// A regular expression to parse the display name format:
-		// ( protocol `/` )? ( hostname `:` `:`? )? display_num ( `.` screen_num )?
-		//
-		// # Examples
-		// - inet6/example.com:1.0
-		// - inet6/1.0
-		// - 1.0
-		// - example.com:1
-		let regex = Regex::new(
-			r"(?x)
-				^
-				(?:(?<protocol>\w+)/)?
-				(?:(?<hostname>.+)(?<host_separator>::?))?
-				(?<display_num>-?\d+)
-				(?:\.(?<screen_num>-?\d+))?
-				$
-			",
-		)
-		.unwrap();
+	pub fn parse(mut name: &str) -> Result<Self, IllFormatted> {
+		let protocol = if let Some((protocol, _name)) = name.split_once('/') {
+			name = _name;
 
-		let captures = match regex.captures(string) {
-			Some(captures) => captures,
-			None => return Err(DisplayNameParseError::IllFormatted),
+			Some(protocol)
+		} else {
+			None
 		};
 
-		// Parse the protocol.
-		let protocol = if let Some(r#match) = captures.name("protocol") {
-			Some(match r#match.as_str() {
-				"::" => Protocol::DecNet,
+		let hostname = if let Some((hostname, _name)) = name.rsplit_once(':') {
+			name = _name;
 
-				_ => match captures.name("protocol").unwrap().as_str() {
-					"tcp" => Protocol::Tcp,
-					"inet" => Protocol::Inet,
-					"inet6" => Protocol::Inet6,
+			let first = |name| name.get(0);
+			let last = |name| name.get(name.len() - 1);
 
-					"unix" => Protocol::Unix,
+			Some(if let Some(':') = last(hostname) {
+				Hostname::DecNet(hostname[..hostname.len() - 1].to_owned())
+			} else if let Some('[') = first(hostname) && let Some(']') = last(hostname) {
+				Hostname::Inet6(hostname[1..hostname.len() - 1].to_owned())
+			} else {
+				match hostname {
+					#[cfg(unix)]
+					"unix" => Hostname::Unix,
 
-					_ => return Err(DisplayNameParseError::UnrecognizedProtocol),
-				},
+					other => Hostname::Other(other.to_owned()),
+				}
 			})
 		} else {
 			None
 		};
 
-		let hostname = captures
-			.name("hostname")
-			.map(|r#match| r#match.as_str().to_owned());
+		let screen = if let Some((_name, screen)) = name.rsplit_once('.') {
+			name = _name;
 
-		// Parse the display number.
-		let display_num = match captures
-			.name("display_num")
-			.unwrap()
-			.as_str()
-			.parse::<isize>()
-		{
-			Ok(display_num) => display_num,
-
-			Err(_) => return Err(DisplayNameParseError::IllFormatted),
-		};
-		// Parse the screen number.
-		let screen_num = if let Some(r#match) = captures.name("screen_num") {
-			Some(match r#match.as_str().parse::<isize>() {
-				Ok(screen_num) => screen_num,
-
-				Err(_) => return Err(DisplayNameParseError::IllFormatted),
-			})
+			Some(screen.parse::<i16>()?)
 		} else {
 			None
 		};
 
 		Ok(Self {
-			protocol,
+			protocol: if let Some(protocol) = protocol {
+				Some(match protocol {
+					"tcp" => Protocol::Tcp,
+					"inet" => Protocol::Inet,
+					"inet6" => Protocol::Inet6,
+
+					#[cfg(unix)]
+					"unix" => Protocol::Unix,
+
+					_ => return Err(DisplayNameParseError::UnrecognizedProtocol),
+				})
+			} else {
+				None
+			},
+
 			hostname,
-			display_num,
-			screen_num,
+
+			display: name.parse::<i16>()?,
+			screen,
 		})
 	}
 }
@@ -239,6 +377,7 @@ impl DisplayName {
 #[non_exhaustive]
 pub enum Protocol {
 	/// A connection is established over DECnet.
+	#[deprecated]
 	DecNet,
 
 	/// A connection is established over TCP.
@@ -248,29 +387,31 @@ pub enum Protocol {
 	/// A connection is established over TCP using IPv6.
 	Inet6,
 
-	/// A connection is established over unix domain sockets (a form of inter-process
-	/// communication, a.k.a. IPC).
+	/// A connection is established over unix domain sockets (a form of
+	/// inter-process communication, a.k.a. IPC).
+	#[cfg(unix)]
 	Unix,
 }
 
-impl Protocol {
-	fn protocol_type(&self) -> ProtocolType {
+impl fmt::Display for Protocol {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::DecNet => ProtocolType::DecNet,
+			#[allow(deprecated)]
+			Protocol::DecNet => Err(fmt::Error),
 
-			Self::Tcp => ProtocolType::Tcp,
-			Self::Inet => ProtocolType::Tcp,
-			Self::Inet6 => ProtocolType::Tcp,
+			Protocol::Tcp => write!(f, "tcp"),
+			Protocol::Inet => write!(f, "inet"),
+			Protocol::Inet6 => write!(f, "inet6"),
 
-			Self::Unix => ProtocolType::Unix,
+			#[cfg(unix)]
+			Protocol::Unix => write!(f, "unix"),
 		}
 	}
 }
 
-enum ProtocolType {
-	DecNet,
-	Tcp,
-	Unix,
+enum IpType {
+	V4,
+	V6,
 }
 
 pub struct AuthInfo {
