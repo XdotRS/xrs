@@ -35,11 +35,11 @@ purposes:
 
 # Examples
 ```rust
-use xrs::{Client, ConnectionError, Message, TargetDisplay};
+use xrs::{Client, ConnectError, Message, Display};
 
 #[tokio::main]
-pub async fn main() -> Result<!, ConnectionError> {
-    let client = Client::connect(TargetDisplay::Default, None)?;
+pub async fn main() -> Result<!, ConnectError> {
+    let client = Client::connect(Display::Default, None)?;
 
     loop {
         if let Some(message) = client.next_message() {
