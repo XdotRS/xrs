@@ -15,7 +15,7 @@ in X.RS directly corresponds to a message in the underlying
 protocols. But X.RS does diverge in the representations of
 those messages: all the same configuration options are
 possible, but the API of messages is restructured in many
-cases to be more intuitive, to elimate a number of errors
+cases to be more intuitive, to eliminate a number of errors
 with increased type safety, and, in general, to be more rusty.
 
 ## `Client`
@@ -35,11 +35,17 @@ purposes:
 
 # Examples
 ```rust
-use xrs::{Client, ConnectError, Message, Display};
+use xrs::{Client, ConnectError, Display, EventMask::*, Message, WindowConfig, x11::request as req};
 
 #[tokio::main]
 pub async fn main() -> Result<!, ConnectError> {
     let client = Client::connect(Display::Default, None)?;
+    let root = client.screens[0].root;
+
+    client.send(req::ConfigureWindow {
+        target: root,
+        config: WindowConfig::new().event_mask(SUBSTRUCTURE_NOTIFY | SUBSTRUCTURE_REDIRECT),
+    }).await?;
 
     loop {
         if let Some(message) = client.next_message() {

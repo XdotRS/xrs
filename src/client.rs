@@ -2,12 +2,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+mod rw;
+
 use async_std::net::TcpStream;
 #[cfg(unix)]
 use async_std::os::unix::net::UnixStream;
 
 use crate::stream::Stream;
 use async_std::{io, io::WriteExt};
+use bytes::BytesMut;
 use chumsky::prelude::*;
 use std::{
 	env,
@@ -35,6 +38,8 @@ enum BitmapFormat {
 
 pub struct Client {
 	stream: Stream,
+	/// A buffer to read bytes into.
+	buffer: BytesMut,
 	// TODO: store info provided by the X server
 }
 
@@ -119,7 +124,10 @@ impl Client {
 		};
 
 		match response {
-			ConnectionResponse::Success(ConnectionSuccess { .. }) => Ok(Self { stream }),
+			ConnectionResponse::Success(ConnectionSuccess { .. }) => Ok(Self {
+				stream,
+				buffer: BytesMut::with_capacity(4096),
+			}),
 
 			ConnectionResponse::Failed(failure) => Err(ConnectError::Failed(failure)),
 			ConnectionResponse::Authenticate(auth_error) => Err(ConnectError::Auth(auth_error)),
