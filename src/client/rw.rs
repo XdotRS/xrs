@@ -77,20 +77,26 @@ impl X11Frame {
 	// https://tokio.rs/tokio/tutorial/framing
 	pub(crate) fn check(buf: &mut Cursor<&[u8]>) -> Result<(), Error> {
 		const BLOCK: usize = 4;
-		const MESSAGE: usize = 32;
-		const REPLY_BODY: usize = MESSAGE - (2 * BLOCK);
+		const REPLY_BODY: usize = 32 - (2 * BLOCK); // 24
 
 		match get_u8(buf)? {
 			// Reply
 			1 => {
+				// Skip the rest of the first block; it can't be invalid at this
+				// level of abstraction.
 				skip(buf, BLOCK - 1)?;
 				let len = get_u32(buf)? as usize;
 
+				// Skip the reply's data, verifying that enough bytes are
+				// present in the process.
 				skip(buf, REPLY_BODY + (len * BLOCK))
 			},
 
 			// Error or event
-			0 | _ => skip(buf, MESSAGE - 1),
+			// Errors and events are always 32 bytes; none can be invalid at
+			// this level of abstraction, so we skip all of them, verifying that
+			// there are enough in the process.
+			0 | _ => skip(buf, 32 - 1),
 		}
 	}
 
