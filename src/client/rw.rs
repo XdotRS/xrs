@@ -2,11 +2,44 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use crate::{client::rw::Error::Incomplete, Client};
-use async_std::io::Cursor;
+use self::Error::Incomplete;
+use crate::Client;
 use bytes::{Buf, Bytes};
+use std::io::Cursor;
+use tokio::{
+	io,
+	io::{AsyncReadExt, AsyncWriteExt},
+};
 
 pub(crate) enum X11Frame {
+	/// <table>
+	///     <tbody>
+	///         <tr>
+	///             <td><b>Byte</b></td>
+	///             <td><b>Meaning</b></td>
+	///         </tr>
+	///         <tr>
+	///             <td>0</td>
+	///             <td><code>major_opcode</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>1</td>
+	///             <td><code>metabyte</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>2</td>
+	///             <td rowspan="2"><code>length</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>3</td>
+	///         </tr>
+	///         <tr>
+	///             <td>4..(4 + (length * 4))</td>
+	///             <td><code>chunk</code></td>
+	///         </tr>
+	///     </tbody>
+	/// </table>
+	///
 	/// Note: requests are never read by X.RS; requests are received by X
 	/// servers, while X.RS is a client library. The only way to tell apart
 	/// requests vs. replies & events is whether they are received by an X
@@ -28,6 +61,46 @@ pub(crate) enum X11Frame {
 		chunk: Bytes,
 	},
 
+	/// <table>
+	///     <tbody>
+	///         <tr>
+	///             <td><b>Byte</b></td>
+	///             <td><b>Meaning</b></td>
+	///         </tr>
+	///         <tr>
+	///             <td>0</td>
+	///             <td><code>1</code> - reply indicator</td>
+	///         </tr>
+	///         <tr>
+	///             <td>1</td>
+	///             <td><code>metabyte</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>2</td>
+	///             <td rowspan="2"><code>sequence</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>3</td>
+	///         </tr>
+	///         <tr>
+	///             <td>4</td>
+	///             <td rowspan="4"><code>length</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>5</td>
+	///         </tr>
+	///         <tr>
+	///             <td>6</td>
+	///         </tr>
+	///         <tr>
+	///             <td>7</td>
+	///         </tr>
+	///         <tr>
+	///             <td>8..(32 + (length * 4))</td>
+	///             <td><code>chunk</code></td>
+	///         </tr>
+	///     </tbody>
+	/// </table>
 	Reply {
 		/// A single byte in the header which may be used for additional data.
 		metabyte: u8,
@@ -42,6 +115,22 @@ pub(crate) enum X11Frame {
 		chunk: Bytes,
 	},
 
+	/// <table>
+	///     <tbody>
+	///         <tr>
+	///             <td><b>Byte</b></td>
+	///             <td><b>Meaning</b></td>
+	///         </tr>
+	///         <tr>
+	///             <td>0</td>
+	///             <td><code>code</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>1..32</td>
+	///             <td><code>chunk</code></td>
+	///         </tr>
+	///     </tbody>
+	/// </table>
 	Event {
 		/// The code uniquely identifying the type of event.
 		code: u8,
@@ -49,6 +138,57 @@ pub(crate) enum X11Frame {
 		chunk: [u8; 31],
 	},
 
+	/// <table>
+	///     <tbody>
+	///         <tr>
+	///             <td><b>Byte</b></td>
+	///             <td><b>Meaning</b></td>
+	///         </tr>
+	///         <tr>
+	///             <td>0</td>
+	///             <td><code>0</code> - error indicator</td>
+	///         </tr>
+	///         <tr>
+	///             <td>1</td>
+	///             <td><code>code</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>2</td>
+	///             <td rowspan="2"><code>sequence</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>3</td>
+	///         </tr>
+	///         <tr>
+	///             <td>4</td>
+	///             <td rowspan="4"><code>metablock</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>5</td>
+	///         </tr>
+	///         <tr>
+	///             <td>6</td>
+	///         </tr>
+	///         <tr>
+	///             <td>7</td>
+	///         </tr>
+	///         <tr>
+	///             <td>8</td>
+	///             <td rowspan="2"><code>minor_opcode</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>9</td>
+	///         </tr>
+	///         <tr>
+	///             <td>10</td>
+	///             <td><code>major_opcode</code></td>
+	///         </tr>
+	///         <tr>
+	///             <td>11..32</td>
+	///             <td><code>chunk</code></td>
+	///         </tr>
+	///     </tbody>
+	/// </table>
 	Error {
 		/// The code uniquely identifying the type of error.
 		code: u8,
@@ -211,8 +351,59 @@ impl Client {
 	}
 
 	// https://tokio.rs/tokio/tutorial/framing
-	pub(crate) async fn write_frame(&mut self, frame: &X11Frame) -> Result<(), !> {
-		todo!()
+	pub(crate) async fn write_frame(&mut self, frame: &X11Frame) -> io::Result<()> {
+		match frame {
+			X11Frame::Request {
+				major_opcode,
+				metabyte,
+				length,
+				chunk,
+			} => {
+				self.stream.write_u8(*major_opcode).await?;
+				self.stream.write_u8(*metabyte).await?;
+				self.stream.write_u16(*length).await?;
+				self.stream.write(&*chunk).await?;
+			},
+
+			X11Frame::Reply {
+				metabyte,
+				sequence,
+				length,
+				chunk,
+			} => {
+				self.stream.write_u8(1).await?;
+				self.stream.write_u8(*metabyte).await?;
+				self.stream.write_u16(*sequence).await?;
+				self.stream.write_u32(*length).await?;
+				self.stream.write(&*chunk).await?;
+			},
+
+			X11Frame::Event { code, chunk } => {
+				self.stream.write_u8(*code).await?;
+				self.stream.write(&*chunk).await?;
+			},
+
+			X11Frame::Error {
+				code,
+				sequence,
+				metablock,
+				minor_opcode,
+				major_opcode,
+				chunk,
+			} => {
+				self.stream.write_u8(0).await?;
+				self.stream.write_u8(*code).await?;
+				self.stream.write_u16(*sequence).await?;
+				self.stream.write(&*metablock).await?;
+				self.stream.write_u16(*minor_opcode).await?;
+				self.stream.write_u8(*major_opcode).await?;
+				self.stream.write(&*chunk).await?;
+			},
+		}
+
+		self.stream.flush().await?;
+
+		Ok(())
 	}
 }
 

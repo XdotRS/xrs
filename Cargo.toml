@@ -15,7 +15,7 @@ categories = [ "api-bindings", "asynchronous", "gui", "network-programming", "re
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-xrb = { path = "../xrb", version = "0.1.0-dev" }
-xrbk = { path = "../xrb/xrbk", version = "0.0.2" }
-async-std = "1"
+# xrb = { path = "../xrb", version = "0.1.0-dev" }
+# xrbk = { path = "../xrb/xrbk", version = "0.0.2" }
 bytes = "1.4.0"
+tokio = { version = "1.25.0", features = ["net", "io-util"] }

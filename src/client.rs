@@ -4,31 +4,33 @@
 
 mod rw;
 
-use async_std::net::TcpStream;
-#[cfg(unix)]
-use async_std::os::unix::net::UnixStream;
-
 use crate::stream::Stream;
-use async_std::{io, io::WriteExt};
+use async_std::io;
 use bytes::BytesMut;
-use chumsky::prelude::*;
 use std::{
 	env,
 	fmt,
 	fmt::Formatter,
 	net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
-use xrb::{
-	connection::{
-		ConnectionAuthenticationError,
-		ConnectionFailure,
-		ConnectionResponse,
-		ConnectionSuccess,
-		InitConnection,
-	},
-	message::Request,
+#[cfg(unix)]
+use tokio::net::UnixStream;
+use tokio::{
+	io,
+	io::{AsyncWriteExt, BufWriter},
+	net::TcpStream,
 };
-use xrbk::{Readable, Writable};
+// use xrb::{
+// 	connection::{
+// 		ConnectionAuthenticationError,
+// 		ConnectionFailure,
+// 		ConnectionResponse,
+// 		ConnectionSuccess,
+// 		InitConnection,
+// 	},
+// 	message::Request,
+// };
+// use xrbk::{Readable, Writable};
 
 enum BitmapFormat {
 	U8,
@@ -37,7 +39,7 @@ enum BitmapFormat {
 }
 
 pub struct Client {
-	stream: Stream,
+	stream: BufWriter<Stream>,
 	/// A buffer to read bytes into.
 	buffer: BytesMut,
 	// TODO: store info provided by the X server
@@ -88,7 +90,8 @@ impl Client {
 		};
 
 		// Open the appropriate data stream.
-		let mut stream = Self::open_stream(&protocol, &hostname, display).await?;
+		let mut stream = BufWriter::new(Stream::open(&protocol, &hostname, display).await?);
+		let mut buffer = BytesMut::with_capacity(4096);
 
 		let (auth_name, auth_data) = match auth {
 			Some(AuthInfo {
@@ -98,50 +101,51 @@ impl Client {
 
 			None => ("", ""),
 		};
-		let message = InitConnection {
-			auth_protocol_name: auth_name.into(),
-			auth_protocol_data: auth_data.into(),
-		};
-
-		// Serialize the `message`.
-		message.write_to(&mut stream).unwrap();
-
-		// Send the `InitConnection` message.
-		if let Err(error) = stream.flush().await {
-			return Err(ConnectError::Io(error));
-		}
-
-		// Receive the connection response.
-		let response = match ConnectionResponse::read_from(&mut stream) {
-			Ok(response) => response,
-
-			Err(error) => {
-				return Err(ConnectError::Io(io::Error::new(
-					io::ErrorKind::Other,
-					error,
-				)))
-			},
-		};
-
-		match response {
-			ConnectionResponse::Success(ConnectionSuccess { .. }) => Ok(Self {
-				stream,
-				buffer: BytesMut::with_capacity(4096),
-			}),
-
-			ConnectionResponse::Failed(failure) => Err(ConnectError::Failed(failure)),
-			ConnectionResponse::Authenticate(auth_error) => Err(ConnectError::Auth(auth_error)),
-		}
+		// let message = InitConnection {
+		// 	auth_protocol_name: auth_name.into(),
+		// 	auth_protocol_data: auth_data.into(),
+		// };
+		//
+		// // Serialize the `message`.
+		// message.write_to(&mut stream).unwrap();
+		//
+		// // Send the `InitConnection` message.
+		// if let Err(error) = stream.flush().await {
+		// 	return Err(ConnectError::Io(error));
+		// }
+		//
+		// // Receive the connection response.
+		// let response = match ConnectionResponse::read_from(&mut stream) {
+		// 	Ok(response) => response,
+		//
+		// 	Err(error) => {
+		// 		return Err(ConnectError::Io(io::Error::new(
+		// 			io::ErrorKind::Other,
+		// 			error,
+		// 		)))
+		// 	},
+		// };
+		//
+		// match response {
+		// 	ConnectionResponse::Success(ConnectionSuccess { .. }) => Ok(Self {
+		// 		stream: BufWriter::new(stream),
+		// 		buffer: BytesMut::with_capacity(4096),
+		// 	}),
+		//
+		// 	ConnectionResponse::Failed(failure) => Err(ConnectError::Failed(failure)),
+		// 	ConnectionResponse::Authenticate(auth_error) =>
+		// Err(ConnectError::Auth(auth_error)), }
+		Ok(Self { stream, buffer })
 	}
 }
 
-impl Client {
-	async fn open_stream(
+impl Stream {
+	async fn open(
 		protocol: &Option<Protocol>, hostname: &Option<Hostname>, display: i16,
-	) -> Result<Stream, ConnectError> {
+	) -> Result<Self, ConnectError> {
 		Ok(match (protocol, hostname) {
 			// IPv4 with address
-			(Some(Protocol::Inet), Some(Hostname::Other(hostname))) => Stream::TcpStream(
+			(Some(Protocol::Inet), Some(Hostname::Other(hostname))) => Self::TcpStream(
 				match Self::open_tcp_stream(Some(IpType::V4), Some(&*hostname), display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
@@ -152,7 +156,7 @@ impl Client {
 			(None, Some(Hostname::Inet6(hostname)))
 			| (Some(Protocol::Tcp), Some(Hostname::Inet6(hostname)))
 			| (Some(Protocol::Inet6), Some(Hostname::Inet6(hostname)))
-			| (Some(Protocol::Inet6), Some(Hostname::Other(hostname))) => Stream::TcpStream(
+			| (Some(Protocol::Inet6), Some(Hostname::Other(hostname))) => Self::TcpStream(
 				match Self::open_tcp_stream(Some(IpType::V6), Some(&*hostname), display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
@@ -161,7 +165,7 @@ impl Client {
 
 			// TCP with address but unspecified IP version
 			(None, Some(Hostname::Other(hostname)))
-			| (Some(Protocol::Tcp), Some(Hostname::Other(hostname))) => Stream::TcpStream(
+			| (Some(Protocol::Tcp), Some(Hostname::Other(hostname))) => Self::TcpStream(
 				match Self::open_tcp_stream(None, Some(&*hostname), display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
@@ -169,7 +173,7 @@ impl Client {
 			),
 
 			// IPv4 without address
-			(Some(Protocol::Inet), None) => Stream::TcpStream(
+			(Some(Protocol::Inet), None) => Self::TcpStream(
 				match Self::open_tcp_stream(Some(IpType::V4), None, display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
@@ -177,7 +181,7 @@ impl Client {
 			),
 
 			// IPv6 without address
-			(Some(Protocol::Inet6), None) => Stream::TcpStream(
+			(Some(Protocol::Inet6), None) => Self::TcpStream(
 				match Self::open_tcp_stream(Some(IpType::V6), None, display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
@@ -186,7 +190,7 @@ impl Client {
 
 			// TCP without address and unspecified IP version
 			(Some(Protocol::Tcp), None) => {
-				Stream::TcpStream(match Self::open_tcp_stream(None, None, display).await {
+				Self::TcpStream(match Self::open_tcp_stream(None, None, display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
 				})
@@ -198,7 +202,7 @@ impl Client {
 			| (None, Some(Hostname::Unix)) // hostname is "unix"
 			| (Some(Protocol::Unix), None) // protocol is "unix"
 			| (Some(Protocol::Unix), Some(Hostname::Unix)) => { // both are "unix"
-				Stream::UnixStream(match Self::open_unix_stream(display).await {
+				Self::UnixStream(match Self::open_unix_stream(display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
 				})
@@ -207,7 +211,7 @@ impl Client {
 			// Default (if neither protocol nor hostname are specified) on #[cfg(not(unix))].
 			#[cfg(not(unix))]
 			(None, None) => {
-				Stream::TcpStream(match Self::open_tcp_stream(None, None, display).await {
+				Self::TcpStream(match Self::open_tcp_stream(None, None, display).await {
 					Ok(stream) => stream,
 					Err(error) => return Err(ConnectError::Io(error)),
 				})
@@ -330,7 +334,7 @@ impl fmt::Display for DisplayName {
 		}
 
 		if let Some(hostname) = &self.hostname {
-			write!(f, hostname)?;
+			write!(f, "{}", hostname)?;
 
 			#[allow(deprecated)]
 			if let Some(Protocol::DecNet) = &self.protocol {
@@ -340,7 +344,7 @@ impl fmt::Display for DisplayName {
 			}
 		}
 
-		write!(f, self.display)?;
+		write!(f, "{}", self.display)?;
 
 		if let Some(screen) = &self.screen {
 			write!(f, ".{}", screen)?;
